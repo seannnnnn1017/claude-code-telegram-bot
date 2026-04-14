@@ -289,21 +289,33 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 _RATE_LIMITS_PATH = Path.home() / ".claude" / "bot_rate_limits.json"
 
 
+async def _refresh_rate_limits():
+    """Run a minimal claude call to trigger the statusline and refresh rate limit data."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            CLAUDE_BIN, "-p", ".", "--output-format", "json",
+            "--dangerously-skip-permissions",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            env={**os.environ, **({"TERM": "dumb"} if sys.platform != "win32" else {})},
+        )
+        await asyncio.wait_for(proc.wait(), timeout=30)
+    except Exception:
+        pass
+
+
 async def cmd_cost(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not authorized(uid):
         return
 
-    if not _RATE_LIMITS_PATH.exists():
-        await update.message.reply_text(
-            "No rate limit data yet. Open Claude Code interactively first to populate the data."
-        )
-        return
+    status = await update.message.reply_text("🔄 Fetching rate limits…")
+    await _refresh_rate_limits()
 
     try:
         data = json.loads(_RATE_LIMITS_PATH.read_text())
     except Exception:
-        await update.message.reply_text("Failed to read rate limit data.")
+        await status.edit_text("❌ Failed to read rate limit data.")
         return
 
     lines = ["<b>Claude Code Usage Limits</b>", ""]
@@ -341,12 +353,7 @@ async def cmd_cost(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not found_any:
         lines.append("No rate limit data — send any message to Claude first.")
 
-    updated_at = data.get("updated_at")
-    if updated_at:
-        age = int(datetime.now().timestamp()) - int(updated_at)
-        lines.append(f"<i>updated {age}s ago</i>")
-
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    await status.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 async def cmd_run(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
