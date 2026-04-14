@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import argparse
 import shlex
+from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 from telegram import Update, BotCommand
@@ -25,7 +26,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from telegram.constants import ParseMode
+from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest
 
 load_dotenv()
@@ -36,6 +37,11 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 logger = logging.getLogger(__name__)
+
+# Suppress noisy HTTP/polling logs from dependencies
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -49,6 +55,10 @@ OPEN_ON_START = os.getenv("OPEN_CLAUDE_ON_START", "").lower() in ("1", "true", "
 STREAM_UPDATE_INTERVAL = 2.0  # seconds between Telegram message edits
 MAX_MSG_LEN = 4096
 CMD_TIMEOUT = 300             # seconds
+
+def _bar(pct: float, width: int = 16) -> str:
+    filled = round(min(pct, 100) / 100 * width)
+    return "[" + "█" * filled + "░" * (width - filled) + "]"
 
 # ── Per-user state ─────────────────────────────────────────────────────────────
 
@@ -94,7 +104,7 @@ async def run_claude_session(
     Streams partial output to status_msg every STREAM_UPDATE_INTERVAL seconds.
     Returns (full_text, new_session_id).
     """
-    args = [CLAUDE_BIN, "-p", prompt, "--output-format", "stream-json", "--verbose"]
+    args = [CLAUDE_BIN, "-p", prompt, "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"]
     if session_id:
         args += ["--resume", session_id]
 
@@ -104,6 +114,7 @@ async def run_claude_session(
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
         env={**os.environ, "TERM": "dumb"},
+        limit=4 * 1024 * 1024,  # 4 MB per line — Claude JSON can be large
     )
     active_procs[user_id] = proc
 
@@ -279,6 +290,56 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Nothing running.")
 
 
+_RATE_LIMITS_PATH = Path.home() / ".claude" / "bot_rate_limits.json"
+
+
+async def cmd_cost(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not authorized(uid):
+        return
+
+    if not _RATE_LIMITS_PATH.exists():
+        await update.message.reply_text(
+            "No rate limit data yet. Send a message first to populate the data."
+        )
+        return
+
+    try:
+        data = json.loads(_RATE_LIMITS_PATH.read_text())
+    except Exception:
+        await update.message.reply_text("Failed to read rate limit data.")
+        return
+
+    lines = ["<b>Claude Code Usage Limits</b>", ""]
+
+    for key, label in (("five_hour", "5-hour"), ("seven_day", "7-day")):
+        entry = data.get(key)
+        if not entry:
+            continue
+        pct = entry.get("used_percentage", 0) or 0
+        resets_at = entry.get("resets_at")
+
+        countdown = ""
+        if resets_at:
+            diff = resets_at - int(datetime.now().timestamp())
+            if diff > 0:
+                h, m = divmod(diff // 60, 60)
+                countdown = f"  resets in {h}h {m}m"
+
+        lines += [
+            f"<b>{label}</b>",
+            f"{_bar(pct)} {pct:.0f}%{countdown}",
+            "",
+        ]
+
+    updated_at = data.get("updated_at")
+    if updated_at:
+        age = int(datetime.now().timestamp()) - updated_at
+        lines.append(f"<i>updated {age}s ago</i>")
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
 async def cmd_run(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not authorized(uid):
@@ -372,7 +433,19 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     label = "💬 Continuing session…" if sid else "🤔 Thinking…"
     status = await update.message.reply_text(label)
 
-    output, new_sid = await run_claude_session(prompt, sid, cwd, uid, status)
+    async def keep_typing():
+        while True:
+            try:
+                await ctx.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
+            except Exception:
+                pass
+            await asyncio.sleep(4)
+
+    typing_task = asyncio.create_task(keep_typing())
+    try:
+        output, new_sid = await run_claude_session(prompt, sid, cwd, uid, status)
+    finally:
+        typing_task.cancel()
 
     if new_sid and new_sid != sid:
         session_ids[uid] = new_sid
@@ -431,6 +504,7 @@ async def post_init(app: Application):
         BotCommand("cd", "Change working directory"),
         BotCommand("pwd", "Show current directory"),
         BotCommand("cancel", "Cancel running command"),
+        BotCommand("cost", "Show API cost usage vs limits"),
         BotCommand("exit", "Shut down bot server"),
         BotCommand("help", "Show help"),
     ])
@@ -474,6 +548,7 @@ def main():
     app.add_handler(CommandHandler("cd", cmd_cd))
     app.add_handler(CommandHandler("run", cmd_run))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
+    app.add_handler(CommandHandler("cost", cmd_cost))
     app.add_handler(CommandHandler("exit", cmd_exit))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
