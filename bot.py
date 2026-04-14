@@ -117,6 +117,7 @@ async def run_claude_session(
     text_buf = ""
     new_session_id = session_id
     last_edit = ""
+    ctx_used_pct: float | None = None
 
     async def periodic_edit():
         nonlocal last_edit
@@ -137,7 +138,7 @@ async def run_claude_session(
 
     try:
         async def read_stdout():
-            nonlocal text_buf, new_session_id
+            nonlocal text_buf, new_session_id, ctx_used_pct
             while True:
                 line = await proc.stdout.readline()
                 if not line:
@@ -163,6 +164,16 @@ async def run_claude_session(
                     # Use result field as fallback if no streamed text
                     if not text_buf.strip():
                         text_buf = obj.get("result", "")
+                    # Calculate context window usage
+                    usage = obj.get("usage") or {}
+                    total_tokens = (
+                        usage.get("input_tokens", 0)
+                        + usage.get("cache_read_input_tokens", 0)
+                        + usage.get("cache_creation_input_tokens", 0)
+                    )
+                    ctx_size = 200_000
+                    if total_tokens:
+                        ctx_used_pct = total_tokens / ctx_size * 100
 
                 # session_id can also appear in system/init messages
                 if not new_session_id and "session_id" in obj:
@@ -180,15 +191,23 @@ async def run_claude_session(
 
     # Log rate limit state after each claude run
     try:
+        mtime_before = _RATE_LIMITS_PATH.stat().st_mtime if _RATE_LIMITS_PATH.exists() else 0
+        await asyncio.sleep(1)  # give statusline subprocess time to finish writing
+        mtime_after = _RATE_LIMITS_PATH.stat().st_mtime if _RATE_LIMITS_PATH.exists() else 0
+        file_updated = mtime_after > mtime_before
+
         rl = json.loads(_RATE_LIMITS_PATH.read_text())
         fh = rl.get("five_hour") or {}
         sd = rl.get("seven_day") or {}
         ts = rl.get("updated_at", 0)
+        ctx_str = f"{ctx_used_pct:.1f}%" if ctx_used_pct is not None else "n/a"
         logger.info(
-            "rate_limits updated_at=%s | 5h=%.0f%% | 7d=%.0f%%",
+            "rate_limits file_updated=%s updated_at=%s | 5h=%.0f%% | 7d=%.0f%% | ctx=%s",
+            file_updated,
             datetime.fromtimestamp(ts).strftime("%H:%M:%S"),
             fh.get("used_percentage") or 0,
             sd.get("used_percentage") or 0,
+            ctx_str,
         )
     except Exception as e:
         logger.warning("Could not read rate limits for log: %s", e)
