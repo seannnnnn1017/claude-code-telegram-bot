@@ -307,20 +307,30 @@ async def cmd_cost(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     lines = ["<b>Claude Code Usage Limits</b>", ""]
+    found_any = False
 
     for key, label in (("five_hour", "5-hour"), ("seven_day", "7-day")):
         entry = data.get(key)
-        if not entry:
+        if not entry or entry.get("used_percentage") is None:
             continue
-        pct = entry.get("used_percentage", 0) or 0
+        found_any = True
+        pct = float(entry["used_percentage"])
         resets_at = entry.get("resets_at")
 
         countdown = ""
         if resets_at:
-            diff = resets_at - int(datetime.now().timestamp())
+            diff = int(resets_at) - int(datetime.now().timestamp())
             if diff > 0:
-                h, m = divmod(diff // 60, 60)
-                countdown = f"  resets in {h}h {m}m"
+                total_min = diff // 60
+                d, rem = divmod(total_min, 1440)   # 1440 min = 1 day
+                h, m = divmod(rem, 60)
+                parts = []
+                if d:
+                    parts.append(f"{d}d")
+                if h:
+                    parts.append(f"{h}h")
+                parts.append(f"{m}m")
+                countdown = f"  resets in {' '.join(parts)}"
 
         lines += [
             f"<b>{label}</b>",
@@ -328,9 +338,12 @@ async def cmd_cost(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "",
         ]
 
+    if not found_any:
+        lines.append("No rate limit data — send any message to Claude first.")
+
     updated_at = data.get("updated_at")
     if updated_at:
-        age = int(datetime.now().timestamp()) - updated_at
+        age = int(datetime.now().timestamp()) - int(updated_at)
         lines.append(f"<i>updated {age}s ago</i>")
 
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
@@ -457,6 +470,15 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
+    logger.error("Unhandled exception", exc_info=ctx.error)
+    if isinstance(update, Update) and update.effective_message:
+        await update.effective_message.reply_text(
+            f"⚠️ Error: <code>{escape_html(str(ctx.error))}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+
+
 async def post_init(app: Application):
     await app.bot.set_my_commands([
         BotCommand("new", "Start a fresh Claude session"),
@@ -506,6 +528,7 @@ def main():
     app.add_handler(CommandHandler("cost", cmd_cost))
     app.add_handler(CommandHandler("exit", cmd_exit))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(error_handler)
 
     app.run_polling(drop_pending_updates=True)
 
