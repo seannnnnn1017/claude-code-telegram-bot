@@ -45,7 +45,7 @@ logging.getLogger("telegram").setLevel(logging.WARNING)
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 _raw_ids = os.getenv("ALLOWED_USER_IDS", "")
 ALLOWED_USERS: set[int] = {int(x) for x in _raw_ids.split(",") if x.strip().isdigit()}
-DEFAULT_DIR = os.getenv("WORKING_DIR", str(Path.home()))
+DEFAULT_DIR = os.getenv("WORKING_DIR") or str(Path.home())
 CLAUDE_BIN = os.getenv("CLAUDE_PATH") or shutil.which("claude") or "claude"
 
 STREAM_UPDATE_INTERVAL = 2.0  # seconds between Telegram message edits
@@ -296,7 +296,7 @@ async def cmd_cost(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if not _RATE_LIMITS_PATH.exists():
         await update.message.reply_text(
-            "No rate limit data yet. Send a message first to populate the data."
+            "No rate limit data yet. Open Claude Code interactively first to populate the data."
         )
         return
 
