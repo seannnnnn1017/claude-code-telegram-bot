@@ -179,7 +179,13 @@ async def run_claude_session(
                 if not new_session_id and "session_id" in obj:
                     new_session_id = obj["session_id"]
 
-        await asyncio.wait_for(read_stdout(), timeout=CMD_TIMEOUT)
+        async def drain_stderr():
+            await proc.stderr.read()
+
+        await asyncio.wait_for(
+            asyncio.gather(read_stdout(), drain_stderr()),
+            timeout=CMD_TIMEOUT,
+        )
         await proc.wait()
 
     except asyncio.TimeoutError:
