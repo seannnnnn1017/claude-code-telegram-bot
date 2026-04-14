@@ -178,6 +178,21 @@ async def run_claude_session(
         edit_task.cancel()
         active_procs.pop(user_id, None)
 
+    # Log rate limit state after each claude run
+    try:
+        rl = json.loads(_RATE_LIMITS_PATH.read_text())
+        fh = rl.get("five_hour") or {}
+        sd = rl.get("seven_day") or {}
+        ts = rl.get("updated_at", 0)
+        logger.info(
+            "rate_limits updated_at=%s | 5h=%.0f%% | 7d=%.0f%%",
+            datetime.fromtimestamp(ts).strftime("%H:%M:%S"),
+            fh.get("used_percentage") or 0,
+            sd.get("used_percentage") or 0,
+        )
+    except Exception as e:
+        logger.warning("Could not read rate limits for log: %s", e)
+
     return text_buf.strip(), new_session_id
 
 
