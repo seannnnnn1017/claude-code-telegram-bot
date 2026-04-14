@@ -12,9 +12,6 @@ import json
 import asyncio
 import logging
 import shutil
-import subprocess
-import argparse
-import shlex
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
@@ -50,7 +47,6 @@ _raw_ids = os.getenv("ALLOWED_USER_IDS", "")
 ALLOWED_USERS: set[int] = {int(x) for x in _raw_ids.split(",") if x.strip().isdigit()}
 DEFAULT_DIR = os.getenv("WORKING_DIR", str(Path.home()))
 CLAUDE_BIN = os.getenv("CLAUDE_PATH") or shutil.which("claude") or "claude"
-OPEN_ON_START = os.getenv("OPEN_CLAUDE_ON_START", "").lower() in ("1", "true", "yes")
 
 STREAM_UPDATE_INTERVAL = 2.0  # seconds between Telegram message edits
 MAX_MSG_LEN = 4096
@@ -113,7 +109,7 @@ async def run_claude_session(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
-        env={**os.environ, "TERM": "dumb"},
+        env={**os.environ, **({"TERM": "dumb"} if sys.platform != "win32" else {})},
         limit=4 * 1024 * 1024,  # 4 MB per line — Claude JSON can be large
     )
     active_procs[user_id] = proc
@@ -459,41 +455,6 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await send_chunks(update, output or "(no output)")
 
 
-# ── Claude window launcher ───────────────────────────────────────────────────
-
-def open_claude_window(cwd: str = DEFAULT_DIR, session_id: str | None = None):
-    """Open Claude Code in a new terminal window (macOS), resuming session if available."""
-    claude_cmd = shlex.quote(CLAUDE_BIN)
-    if session_id:
-        claude_cmd += f" --resume {shlex.quote(session_id)}"
-    cmd = f"cd {shlex.quote(cwd)} && {claude_cmd}"
-
-    iterm_script = f'''tell application "iTerm2"
-    create window with default profile
-    tell current session of current window
-        write text "{cmd}"
-    end tell
-end tell'''
-
-    terminal_script = f'''tell application "Terminal"
-    do script "{cmd}"
-    activate
-end tell'''
-
-    iterm_check = subprocess.run(
-        ["osascript", "-e", 'application "iTerm2" exists'],
-        capture_output=True, text=True,
-    )
-    use_iterm = iterm_check.stdout.strip() == "true"
-    script = iterm_script if use_iterm else terminal_script
-
-    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
-    if result.returncode == 0:
-        logger.info("Opened Claude Code in %s", "iTerm2" if use_iterm else "Terminal.app")
-    else:
-        logger.warning("Could not open Claude Code window: %s", result.stderr.strip())
-
-
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 async def post_init(app: Application):
@@ -512,18 +473,12 @@ async def post_init(app: Application):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Claude Code Telegram Bot")
-    parser.add_argument(
-        "--open-claude", action="store_true",
-        help="Open an interactive Claude Code window on startup (macOS)",
-    )
-    args = parser.parse_args()
-
     if not BOT_TOKEN:
         sys.exit("❌ TELEGRAM_BOT_TOKEN is not set. Copy .env.example → .env and fill it in.")
 
-    if args.open_claude or OPEN_ON_START:
-        open_claude_window(DEFAULT_DIR)
+    # Windows requires ProactorEventLoop for subprocess support
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
     logger.info("Starting Claude Code Telegram bot…")
     logger.info("Claude binary: %s", CLAUDE_BIN)
