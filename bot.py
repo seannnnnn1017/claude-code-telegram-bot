@@ -304,13 +304,30 @@ async def _refresh_rate_limits():
         pass
 
 
+_RATE_LIMITS_STALE_SECS = 300  # refresh only if data is older than 5 minutes
+
+
 async def cmd_cost(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not authorized(uid):
         return
 
-    status = await update.message.reply_text("🔄 Fetching rate limits…")
-    await _refresh_rate_limits()
+    # Check if existing data is fresh enough
+    needs_refresh = True
+    if _RATE_LIMITS_PATH.exists():
+        try:
+            cached = json.loads(_RATE_LIMITS_PATH.read_text())
+            age = int(datetime.now().timestamp()) - int(cached.get("updated_at", 0))
+            if age < _RATE_LIMITS_STALE_SECS:
+                needs_refresh = False
+        except Exception:
+            pass
+
+    if needs_refresh:
+        status = await update.message.reply_text("🔄 Fetching rate limits…")
+        await _refresh_rate_limits()
+    else:
+        status = await update.message.reply_text("📊 Loading…")
 
     try:
         data = json.loads(_RATE_LIMITS_PATH.read_text())
@@ -352,6 +369,11 @@ async def cmd_cost(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if not found_any:
         lines.append("No rate limit data — send any message to Claude first.")
+
+    updated_at = data.get("updated_at")
+    if updated_at:
+        age = int(datetime.now().timestamp()) - int(updated_at)
+        lines.append(f"<i>updated {age}s ago</i>")
 
     await status.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
