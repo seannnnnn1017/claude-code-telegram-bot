@@ -289,50 +289,19 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 _RATE_LIMITS_PATH = Path.home() / ".claude" / "bot_rate_limits.json"
 
 
-async def _refresh_rate_limits():
-    """Run a minimal claude call to trigger the statusline and refresh rate limit data."""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            CLAUDE_BIN, "-p", ".", "--output-format", "json",
-            "--dangerously-skip-permissions",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-            env={**os.environ, **({"TERM": "dumb"} if sys.platform != "win32" else {})},
-        )
-        await asyncio.wait_for(proc.wait(), timeout=30)
-    except Exception:
-        pass
-
-
-_RATE_LIMITS_STALE_SECS = 300  # refresh only if data is older than 5 minutes
-
-
 async def cmd_cost(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not authorized(uid):
         return
 
-    # Check if existing data is fresh enough
-    needs_refresh = True
-    if _RATE_LIMITS_PATH.exists():
-        try:
-            cached = json.loads(_RATE_LIMITS_PATH.read_text())
-            age = int(datetime.now().timestamp()) - int(cached.get("updated_at", 0))
-            if age < _RATE_LIMITS_STALE_SECS:
-                needs_refresh = False
-        except Exception:
-            pass
-
-    if needs_refresh:
-        status = await update.message.reply_text("🔄 Fetching rate limits…")
-        await _refresh_rate_limits()
-    else:
-        status = await update.message.reply_text("📊 Loading…")
+    if not _RATE_LIMITS_PATH.exists():
+        await update.message.reply_text("No rate limit data yet — send a message first.")
+        return
 
     try:
         data = json.loads(_RATE_LIMITS_PATH.read_text())
     except Exception:
-        await status.edit_text("❌ Failed to read rate limit data.")
+        await update.message.reply_text("❌ Failed to read rate limit data.")
         return
 
     lines = ["<b>Claude Code Usage Limits</b>", ""]
@@ -375,7 +344,7 @@ async def cmd_cost(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         age = int(datetime.now().timestamp()) - int(updated_at)
         lines.append(f"<i>updated {age}s ago</i>")
 
-    await status.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 async def cmd_run(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
